@@ -43,8 +43,9 @@ router = APIRouter(
     "/search",
     response_model=PropertySearchResponse,
     summary="Поиск объектов недвижимости",
-    description="""
+    description=""" 
     Выполняет поиск и фильтрацию объектов недвижимости по различным параметрам.
+    Автоматически убирает дубликаты по комбинации client_name и address.
     
     **Параметры фильтрации (все опциональны):**
     - `price_min`: минимальная цена (contract_price >= price_min)
@@ -115,6 +116,7 @@ async def search_properties(
 ):
     """
     Поиск объектов недвижимости с фильтрацией и сортировкой.
+    Убирает дубликаты по комбинации client_name и address.
     
     Все параметры фильтрации опциональны. Если параметр не указан, 
     он не применяется к результатам поиска.
@@ -144,8 +146,7 @@ async def search_properties(
     if score_min is not None and (score_min < 0 or score_min > 5):
         score_min = None
     
-    # Начинаем построение запроса
-    query = select(Property)
+    # Создаем список условий для фильтрации
     conditions = []
 
     # Применяем фильтры
@@ -176,14 +177,47 @@ async def search_properties(
     if address and address.strip():
         conditions.append(Property.address.ilike(f"%{address}%"))
 
-    # Применяем условия к запросу
+    # Создаем подзапрос для получения уникальных комбинаций client_name и address
+    # Используем MIN(crm_id) чтобы выбрать одну запись из дубликатов
+    unique_subquery = select(
+        func.min(Property.crm_id).label('min_crm_id')
+    ).group_by(
+        Property.client_name,
+        Property.address
+    )
+    
+    # Применяем фильтры к подзапросу
+    if conditions:
+        unique_subquery = unique_subquery.where(and_(*conditions))
+    
+    unique_subquery = unique_subquery.subquery()
+    
+    # Основной запрос - выбираем только записи с минимальным crm_id для каждой пары
+    query = select(Property).join(
+        unique_subquery,
+        Property.crm_id == unique_subquery.c.min_crm_id
+    )
+    
+    # Применяем условия к основному запросу (для безопасности, хотя они уже в подзапросе)
     if conditions:
         query = query.where(and_(*conditions))
 
-    # Подсчет общего количества результатов (для пагинации)
-    count_query = select(func.count()).select_from(Property)
+    # Подсчет общего количества уникальных результатов
+    # Используем тот же подход с группировкой
+    count_subquery = select(
+        func.min(Property.crm_id).label('min_crm_id')
+    ).group_by(
+        Property.client_name,
+        Property.address
+    )
+    
     if conditions:
-        count_query = count_query.where(and_(*conditions))
+        count_subquery = count_subquery.where(and_(*conditions))
+    
+    count_subquery = count_subquery.subquery()
+    
+    # Считаем количество уникальных комбинаций
+    count_query = select(func.count()).select_from(count_subquery)
     
     total_result = await db.execute(count_query)
     total = total_result.scalar() or 0
