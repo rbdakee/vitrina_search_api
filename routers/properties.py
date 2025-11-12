@@ -5,10 +5,32 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_
-from typing import Optional
+from typing import Optional, Union
 from database import get_db
 from models import Property
 from schemas import PropertyResponse, PropertySearchResponse
+
+def parse_optional_int(value: Optional[Union[int, str]]) -> Optional[int]:
+    """Преобразует значение в int или возвращает None для пустых строк"""
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        try:
+            return int(value) if value.strip() else None
+        except ValueError:
+            return None
+    return int(value)
+
+def parse_optional_float(value: Optional[Union[float, str]]) -> Optional[float]:
+    """Преобразует значение в float или возвращает None для пустых строк"""
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        try:
+            return float(value) if value.strip() else None
+        except ValueError:
+            return None
+    return float(value)
 
 router = APIRouter(
     prefix="/api/properties",
@@ -77,14 +99,14 @@ router = APIRouter(
     response_description="Список найденных объектов недвижимости с метаданными пагинации"
 )
 async def search_properties(
-    price_min: Optional[int] = Query(None, description="Минимальная цена", example=10000000, ge=0),
-    price_max: Optional[int] = Query(None, description="Максимальная цена", example=40000000, ge=0),
+    price_min: Optional[Union[int, str]] = Query(default=None, description="Минимальная цена", example=10000000),
+    price_max: Optional[Union[int, str]] = Query(default=None, description="Максимальная цена", example=40000000),
     complex: Optional[str] = Query(None, description="Название ЖК (частичное совпадение)", example="Grand"),
-    area_min: Optional[float] = Query(None, description="Минимальная площадь", example=40.0, ge=0),
-    area_max: Optional[float] = Query(None, description="Максимальная площадь", example=100.0, ge=0),
-    rooms_count_min: Optional[int] = Query(None, description="Минимальное количество комнат", example=1, ge=1, le=10),
-    rooms_count_max: Optional[int] = Query(None, description="Максимальное количество комнат", example=5, ge=1, le=10),
-    score_min: Optional[float] = Query(None, description="Минимальный рейтинг", example=4.0, ge=0, le=5),
+    area_min: Optional[Union[float, str]] = Query(None, description="Минимальная площадь", example=40.0),
+    area_max: Optional[Union[float, str]] = Query(None, description="Максимальная площадь", example=100.0),
+    rooms_count_min: Optional[Union[int, str]] = Query(None, description="Минимальное количество комнат", example=1),
+    rooms_count_max: Optional[Union[int, str]] = Query(None, description="Максимальное количество комнат", example=5),
+    score_min: Optional[Union[float, str]] = Query(None, description="Минимальный рейтинг", example=4.0),
     address: Optional[str] = Query(None, description="Поиск по адресу (частичное совпадение)", example="Нура"),
     limit: int = Query(100, description="Количество результатов на странице", example=100, ge=1, le=1000),
     offset: int = Query(0, description="Смещение для пагинации", example=0, ge=0),
@@ -97,6 +119,31 @@ async def search_properties(
     Все параметры фильтрации опциональны. Если параметр не указан, 
     он не применяется к результатам поиска.
     """
+    # В начале функции используйте функции-парсеры
+    price_min = parse_optional_int(price_min)
+    price_max = parse_optional_int(price_max)
+    area_min = parse_optional_float(area_min)
+    area_max = parse_optional_float(area_max)
+    rooms_count_min = parse_optional_int(rooms_count_min)
+    rooms_count_max = parse_optional_int(rooms_count_max)
+    score_min = parse_optional_float(score_min)
+    
+    # Валидация значений
+    if price_min is not None and price_min < 0:
+        price_min = None
+    if price_max is not None and price_max < 0:
+        price_max = None
+    if area_min is not None and area_min < 0:
+        area_min = None
+    if area_max is not None and area_max < 0:
+        area_max = None
+    if rooms_count_min is not None and (rooms_count_min < 1 or rooms_count_min > 10):
+        rooms_count_min = None
+    if rooms_count_max is not None and (rooms_count_max < 1 or rooms_count_max > 10):
+        rooms_count_max = None
+    if score_min is not None and (score_min < 0 or score_min > 5):
+        score_min = None
+    
     # Начинаем построение запроса
     query = select(Property)
     conditions = []
@@ -108,7 +155,7 @@ async def search_properties(
     if price_max is not None:
         conditions.append(Property.contract_price <= price_max)
     
-    if complex:
+    if complex and complex.strip():
         conditions.append(Property.complex.ilike(f"%{complex}%"))
     
     if area_min is not None:
@@ -126,7 +173,7 @@ async def search_properties(
     if score_min is not None:
         conditions.append(Property.score >= score_min)
     
-    if address:
+    if address and address.strip():
         conditions.append(Property.address.ilike(f"%{address}%"))
 
     # Применяем условия к запросу
