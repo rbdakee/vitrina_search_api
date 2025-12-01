@@ -56,3 +56,46 @@ class Property(Base):
     def __repr__(self):
         return f"<Property(crm_id='{self.crm_id}', complex='{self.complex}', address='{self.address}')>"
 
+
+class ParsedProperty(Base):
+    """
+    Модель для таблицы parsed_properties.
+    Представляет объекты недвижимости с Крыши.
+    """
+    __tablename__ = "parsed_properties"
+    
+    vitrina_id = Column(BigInteger, primary_key=True, autoincrement=True)
+    rbd_id = Column(BigInteger, unique=True, nullable=False)
+    krisha_id = Column(String(64), nullable=True)
+    krisha_date = Column(DateTime(timezone=True), nullable=True)
+    object_type = Column(String(255), nullable=True)
+    address = Column(Text, nullable=True)
+    complex = Column(String(255), nullable=True)
+    builder = Column(String(255), nullable=True)
+    flat_type = Column(String(255), nullable=True)
+    property_class = Column(String(255), nullable=True)
+    condition = Column(String(255), nullable=True)
+    sell_price = Column(Float, nullable=True)
+    sell_price_per_m2 = Column(Float, nullable=True)
+    address_type = Column(String(255), nullable=True)
+    house_num = Column(String(255), nullable=True)
+    floor_num = Column(Integer, nullable=True)
+    floor_count = Column(Integer, nullable=True)
+    room_count = Column(Integer, nullable=True)
+    phones = Column(String(255), nullable=True)
+    description = Column(Text, nullable=True)
+    ceiling_height = Column(Float, nullable=True)
+    area = Column(Float, nullable=True)
+    year_built = Column(Integer, nullable=True)
+    wall_type = Column(String(255), nullable=True)
+    stats_agent_given = Column(String(255), nullable=True)
+    stats_time_given = Column(DateTime(timezone=True), nullable=True)
+    stats_object_status = Column(String(255), nullable=True)
+    stats_recall_time = Column(DateTime(timezone=True), nullable=True)
+    stats_description = Column(Text, nullable=True)
+    stats_object_category = Column(String(10), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.current_timestamp(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.current_timestamp(), onupdate=func.current_timestamp(), nullable=False)
+    
+    def __repr__(self):
+        return f"<ParsedProperty(vitrina_id={self.vitrina_id}, complex='{self.complex}', address='{self.address}')>"

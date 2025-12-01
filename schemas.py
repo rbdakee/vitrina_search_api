@@ -9,32 +9,38 @@ from datetime import date
 
 class PropertyResponse(BaseModel):
     """
-    Схема ответа для объекта недвижимости.
-    Используется в эндпоинте поиска.
+    Унифицированная схема ответа для объекта недвижимости.
+    Поддерживает данные из properties (Витрина) и parsed_properties (Крыша).
     """
-    crm_id: str = Field(..., description="Уникальный идентификатор CRM", example="139967")
+    id: str = Field(..., description="Уникальный идентификатор (crm_id для Витрины, vitrina_id для Крыши)", example="139967")
+    source: str = Field(..., description="Источник данных: 'Витрина' или 'Крыша'", example="Витрина")
     complex: Optional[str] = Field(None, description="Название жилого комплекса", example="Grand Turan Business")
     address: Optional[str] = Field(None, description="Адрес объекта", example="Астана, Нура, проспект Туран 41А")
-    contract_price: Optional[int] = Field(None, description="Цена по договору", example=38000000)
+    price: Optional[int] = Field(None, description="Цена (contract_price для Витрины, sell_price для Крыши)", example=38000000)
     area: Optional[float] = Field(None, description="Площадь объекта в кв.м", example=45)
     rooms_count: Optional[int] = Field(None, description="Количество комнат", example=2)
-    score: Optional[float] = Field(None, description="Рейтинг объекта", example=8.4)
     category: Optional[str] = Field(None, description="Категория объекта", example="A")
-    status: Optional[str] = Field(None, description="Статус объекта", example="Размещено")
+    score: Optional[float] = Field(None, description="Рейтинг объекта (только для Витрины)", example=8.4)
+    krisha_id: Optional[str] = Field(None, description="ID на Крыше (только для Крыши)", example="12345")
+    contact: Optional[str] = Field(None, description="Контакт: МОП для Витрины, stats_agent_given для Крыши", example="МОП: +7 777 123 4567")
+    phones: Optional[str] = Field(None, description="Телефоны (только для Крыши)", example="+7 777 123 4567, +7 777 765 4321")
 
     class Config:
         from_attributes = True
         json_schema_extra = {
             "example": {
-                "crm_id": "139967",
+                "id": "139967",
+                "source": "Витрина",
                 "complex": "Grand Turan Business",
                 "address": "Астана, Нура, проспект Туран 41А",
-                "contract_price": 38000000,
+                "price": 38000000,
                 "area": 45,
                 "rooms_count": 2,
                 "score": 8.4,
                 "category": "A",
-                "status": "Размещено"
+                "krisha_id": None,
+                "contact": "МОП: +7 777 123 4567",
+                "phones": None
             }
         }
 
@@ -153,62 +159,49 @@ class PropertySearchResponse(BaseModel):
             "example": {
                 "items": [
                     {
-                        "crm_id": "139967",
+                        "id": "139967",
+                        "source": "Витрина",
                         "complex": "Grand Turan Business",
                         "address": "Астана, Нура, проспект Туран 41А",
-                        "contract_price": 38000000,
+                        "price": 38000000,
                         "area": 45,
                         "rooms_count": 2,
                         "score": 8.4,
                         "category": "A",
-                        "status": "Размещено"
+                        "krisha_id": None,
+                        "contact": "МОП: +7 777 123 4567",
+                        "phones": None
                     },
                     {
-                        "crm_id": "142312",
+                        "id": "142312",
+                        "source": "Витрина",
                         "complex": "Grand Turan Comfort",
                         "address": "Астана, Нура, проспект Туран 43/1",
-                        "contract_price": 37000000,
+                        "price": 37000000,
                         "area": 46,
                         "rooms_count": 1,
                         "score": 9.5,
                         "category": "B",
-                        "status": "Размещено"
+                        "krisha_id": None,
+                        "contact": "МОП: +7 777 234 5678",
+                        "phones": None
                     },
                     {
-                        "crm_id": "140476",
-                        "complex": "Grand Turan Comfort",
-                        "address": "Астана, Нура, проспект Туран 43/1",
-                        "contract_price": 38500000,
-                        "area": 46,
-                        "rooms_count": 1,
-                        "score": 9.5,
-                        "category": "B",
-                        "status": "Размещено"
-                    },
-                    {
-                        "crm_id": "140227",
-                        "complex": "Grand Turan Comfort 4-1",
-                        "address": "Астана, Нура, проспект Туран 43/5",
-                        "contract_price": 39500000,
-                        "area": 42,
-                        "rooms_count": 1,
-                        "score": 9.5,
-                        "category": "B",
-                        "status": "Размещено"
-                    },
-                    {
-                        "crm_id": "137324",
-                        "complex": "Grand Champion",
-                        "address": "Астана, Нура, проспект Туран 46/6",
-                        "contract_price": 26000000,
-                        "area": 42.4,
-                        "rooms_count": 1,
-                        "score": 8.1,
-                        "category": "B",
-                        "status": "Размещено"
+                        "id": "12345",
+                        "source": "Крыша",
+                        "complex": "Grand Turan Premium",
+                        "address": "Астана, Нура, проспект Туран 50",
+                        "price": 40000000,
+                        "area": 50,
+                        "rooms_count": 2,
+                        "score": None,
+                        "category": "A",
+                        "krisha_id": "67890",
+                        "contact": "Иван Иванов",
+                        "phones": "+7 777 345 6789, +7 777 456 7890"
                     }
                 ],
-                "total": 5,
+                "total": 3,
                 "limit": 100,
                 "offset": 0
             }
