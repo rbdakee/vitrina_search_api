@@ -4,7 +4,7 @@
 """
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, or_
 from typing import Optional, Union
 from database import get_db
 from models import Property, ParsedProperty
@@ -164,7 +164,13 @@ async def search_properties(
     
     # ========== ЗАПРОС К ТАБЛИЦЕ parsed_properties (Крыша) ==========
     krisha_conditions = []
-    krisha_conditions.append(ParsedProperty.stats_object_status != "Архив")
+    # Исключаем только объекты со статусом "Архив", но разрешаем NULL
+    krisha_conditions.append(
+        or_(
+            ParsedProperty.stats_object_status != "Архив",
+            ParsedProperty.stats_object_status.is_(None)
+        )
+    )
     
     if price_min is not None:
         krisha_conditions.append(ParsedProperty.sell_price >= price_min)
