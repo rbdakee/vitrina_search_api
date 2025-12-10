@@ -2,13 +2,23 @@
 Роутер для работы с объектами недвижимости.
 Содержит эндпоинт для поиска и фильтрации properties.
 """
+import os
+import asyncio
+from typing import Optional, Union, List, Dict
+
+import httpx
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_
-from typing import Optional, Union
+
 from database import get_db
-from models import Property, ParsedProperty
+from models import Property, ParsedProperty, VitrinaAgent
 from schemas import PropertyResponse, PropertySearchResponse
+from dotenv import load_dotenv
+
+load_dotenv()
+
+AGENTS_API_URL = "https://vm.jurta.kz/api/agents/getAgentsToAssign"
 
 def parse_optional_int(value: Optional[Union[int, str]]) -> Optional[int]:
     """Преобразует значение в int или возвращает None для пустых строк"""
@@ -31,6 +41,200 @@ def parse_optional_float(value: Optional[Union[float, str]]) -> Optional[float]:
         except ValueError:
             return None
     return float(value)
+
+def _normalize_words(text: str) -> List[str]:
+    return [word.strip().lower() for word in text.split() if word and word.strip()]
+
+
+def _make_full_name(agent: Dict, reverse: bool = False) -> Optional[str]:
+    """
+    Создает полное имя из surname и name.
+    Если reverse=True, то порядок name + surname (для поиска в обратном порядке).
+    """
+    surname = (agent.get("surname") or "").strip()
+    name = (agent.get("name") or "").strip()
+    if reverse:
+        full = " ".join([part for part in [name, surname] if part])
+    else:
+        full = " ".join([part for part in [surname, name] if part])
+    return full or None
+
+
+def find_agent_phone_from_db(mop: Optional[str], db_agents: list, crm_id: str = None) -> Optional[str]:
+    """
+    Находит телефон агента используя список агентов из таблицы vitrina_agents (БД).
+    Ищет совпадение: если full_name состоит из 2 слов, ищет эти слова в mop (обычно 3 слова).
+    Если несколько совпадений, выбирает то, где больше совпадений.
+    
+    Args:
+        mop: Значение из properties.mop (обычно 3 слова)
+        db_agents: Список агентов из таблицы vitrina_agents
+        crm_id: ID объекта для логирования
+        
+    Returns:
+        agent_phone или None если не найдено
+    """
+    if not mop or not mop.strip():
+        return None
+
+    mop_words = _normalize_words(mop)
+    if not mop_words:
+        return None
+
+    best_match = None
+    best_match_score = 0
+
+    for agent in db_agents:
+        if not agent.full_name or not agent.full_name.strip():
+            continue
+
+        agent_words = _normalize_words(agent.full_name)
+        if not agent_words:
+            continue
+
+        matches = sum(1 for agent_word in agent_words if agent_word in mop_words)
+        
+        if matches == len(agent_words) and matches > best_match_score:
+            best_match = agent.agent_phone
+            best_match_score = matches
+
+    return best_match
+
+
+def find_agent_name_by_phone_from_db(agent_phone: Optional[str], db_agents: list) -> Optional[str]:
+    """
+    Находит имя агента по телефону из таблицы vitrina_agents (БД).
+    
+    Args:
+        agent_phone: Телефон агента (stats_agent_given для Крыши)
+        db_agents: Список агентов из таблицы vitrina_agents
+        
+    Returns:
+        full_name или None если не найдено
+    """
+    if not agent_phone or not agent_phone.strip():
+        return None
+
+    phone_clean = agent_phone.strip()
+    for agent in db_agents:
+        if agent.agent_phone and agent.agent_phone.strip() == phone_clean:
+            return agent.full_name
+
+    return None
+
+
+def find_agent_phone_from_api(mop: Optional[str], api_agents_cache: List[Dict], crm_id: str = None) -> Optional[str]:
+    """
+    Находит телефон агента используя УЖЕ ЗАГРУЖЕННЫЙ кэш агентов из внешнего API (fallback).
+    
+    Ищет совпадение: если full_name состоит из 2 слов, ищет эти слова в mop (обычно 3 слова).
+    Если несколько совпадений, выбирает то, где больше совпадений.
+    
+    Args:
+        mop: Значение из properties.mop (обычно 3 слова)
+        api_agents_cache: УЖЕ ЗАГРУЖЕННЫЙ список агентов из внешнего API (кэш)
+        crm_id: ID объекта для логирования
+        
+    Returns:
+        agent_phone (login) или None если не найдено
+    """
+    if not mop or not mop.strip():
+        return None
+
+    mop_words = _normalize_words(mop)
+    if not mop_words:
+        return None
+
+    best_match = None
+    best_match_score = 0
+    checked_agents = []
+
+    for agent in api_agents_cache:
+        # Пробуем оба варианта: surname + name и name + surname
+        for reverse in [False, True]:
+            full_name = _make_full_name(agent, reverse=reverse)
+            if not full_name:
+                continue
+
+            agent_words = _normalize_words(full_name)
+            if not agent_words:
+                continue
+
+            matches = sum(1 for agent_word in agent_words if agent_word in mop_words)
+            checked_agents.append((full_name, matches, len(agent_words)))
+            
+            if matches == len(agent_words) and matches > best_match_score:
+                best_match = agent.get("login")
+                best_match_score = matches
+                # Если нашли совпадение, не проверяем обратный порядок для этого агента
+                break
+
+    return best_match
+
+
+def find_agent_name_by_phone_from_api(agent_phone: Optional[str], api_agents_cache: List[Dict]) -> Optional[str]:
+    """
+    Находит имя агента по телефону из УЖЕ ЗАГРУЖЕННОГО кэша внешнего API (fallback).
+    
+    Args:
+        agent_phone: Телефон агента (stats_agent_given для Крыши)
+        api_agents_cache: УЖЕ ЗАГРУЖЕННЫЙ список агентов из внешнего API (кэш)
+        
+    Returns:
+        full_name (surname + name) или None если не найдено
+    """
+    if not agent_phone or not agent_phone.strip():
+        return None
+
+    phone_clean = agent_phone.strip()
+    for agent in api_agents_cache:
+        if agent.get("login") and agent.get("login").strip() == phone_clean:
+            return _make_full_name(agent)
+
+    return None
+
+
+async def fetch_agents_from_api() -> List[Dict]:
+    """
+    Загружает агентов из внешнего API и возвращает список словарей.
+    """
+    token = os.getenv("AGENTS_API_TOKEN")
+    if not token:
+        return []
+
+    headers = {
+        "accept": "*/*",
+        "Authorization": f"Bearer {token}"
+    }
+
+    # Пробуем загрузить с повторными попытками
+    max_retries = 3
+    timeout = 30.0  # Увеличиваем таймаут до 30 секунд
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.get(AGENTS_API_URL, headers=headers)
+                response.raise_for_status()
+                payload = response.json()
+                agents = payload.get("data", {}).get("data", []) or []
+                return agents
+        except httpx.TimeoutException as e:
+            if attempt < max_retries:
+                # Ждем перед следующей попыткой
+                await asyncio.sleep(2 * attempt)  # Экспоненциальная задержка
+                continue
+            else:
+                return []
+        except httpx.HTTPStatusError as e:
+            return []
+        except Exception as e:
+            if attempt < max_retries:
+                await asyncio.sleep(2 * attempt)
+                continue
+            return []
+    
+    return []
 
 router = APIRouter(
     prefix="/api/properties",
@@ -215,12 +419,17 @@ async def search_properties(
     
     total = vitrina_total + krisha_total
     
-    # Преобразуем в унифицированный формат
+    # ========== ЗАГРУЗКА АГЕНТОВ ИЗ ТАБЛИЦЫ vitrina_agents (БД) ==========
+    # Сначала загружаем агентов из БД - это быстро и основной источник данных
+    db_agents_query = select(VitrinaAgent)
+    db_agents_result = await db.execute(db_agents_query)
+    db_agents = db_agents_result.scalars().all()
+    
+    # Преобразуем в унифицированный формат БЕЗ поиска контактов (для производительности)
     items = []
     
     # Обрабатываем объекты из Витрины
     for prop in vitrina_properties:
-        contact = f"{prop.mop}" if prop.mop else None
         items.append({
             'id': str(prop.crm_id),
             'source': 'Витрина',
@@ -232,14 +441,15 @@ async def search_properties(
             'category': prop.category,
             'score': prop.score,
             'krisha_id': None,
-            'contact': contact,
+            'contact_name': None,  # Будет заполнено после пагинации
+            'contact_phone': None,  # Будет заполнено после пагинации
             'phones': None,
+            '_mop': prop.mop,  # Сохраняем для поиска контакта
             '_sort_key': (0, prop.category or '', -(prop.score or 0), prop.contract_price or 0, -(prop.area or 0))
         })
     
     # Обрабатываем объекты из Крыши
     for prop in krisha_properties:
-        contact = prop.stats_agent_given if prop.stats_agent_given and prop.stats_agent_given.strip() else "Пусто"
         items.append({
             'id': str(prop.vitrina_id),
             'source': 'Крыша',
@@ -251,8 +461,10 @@ async def search_properties(
             'category': prop.stats_object_category,
             'score': None,
             'krisha_id': prop.krisha_id,
-            'contact': contact,
+            'contact_name': None,  # Будет заполнено после пагинации
+            'contact_phone': None,  # Будет заполнено после пагинации
             'phones': prop.phones,
+            '_stats_agent_given': prop.stats_agent_given,  # Сохраняем для поиска контакта
             '_sort_key': (1, prop.stats_object_category or '', 0, prop.sell_price or 0, -(prop.area or 0))
         })
     
@@ -308,6 +520,82 @@ async def search_properties(
     # Применяем пагинацию
     paginated_items = items[offset:offset + limit]
     
+    # ========== ПОИСК КОНТАКТОВ ДЛЯ ОБЪЕКТОВ ПОСЛЕ ПАГИНАЦИИ ==========
+    # Сначала ищем в БД (быстро), затем в API как fallback (только для объектов, где не нашли)
+    stats_phone_null_name_not_null = 0
+    stats_phone_not_null_name_null = 0
+    stats_both_null = 0
+    stats_both_not_null = 0
+    
+    # Список объектов, которым нужен fallback к API
+    need_api_fallback = []
+    
+    # Первый проход: поиск в БД
+    for item in paginated_items:
+        if item['source'] == 'Витрина':
+            # Для Витрины: contact_name = mop, contact_phone из поиска в БД
+            mop = item.get('_mop')
+            contact_name = mop if mop else None
+            contact_phone = find_agent_phone_from_db(mop, db_agents, crm_id=item['id'])
+            
+            # Если не нашли в БД, добавим в список для fallback к API
+            if contact_phone is None and contact_name:
+                need_api_fallback.append(('vitrina', item, mop))
+        else:
+            # Для Крыши: contact_phone = stats_agent_given, contact_name из поиска в БД
+            stats_agent_given = item.get('_stats_agent_given')
+            if not stats_agent_given or not stats_agent_given.strip():
+                contact_name = None
+                contact_phone = None
+            else:
+                contact_phone = stats_agent_given.strip()
+                contact_name = find_agent_name_by_phone_from_db(contact_phone, db_agents)
+                
+                # Если не нашли в БД, добавим в список для fallback к API
+                if contact_name is None:
+                    need_api_fallback.append(('krisha', item, contact_phone))
+        
+        # Сохраняем результаты первого прохода
+        item['contact_name'] = contact_name
+        item['contact_phone'] = contact_phone
+    
+    # Второй проход: fallback к API (только если есть объекты, которым нужен fallback)
+    api_agents_cache = None
+    if need_api_fallback:
+        api_agents_cache = await fetch_agents_from_api()
+        
+        for fallback_type, item, search_value in need_api_fallback:
+            if fallback_type == 'vitrina':
+                # Поиск телефона в API
+                contact_phone = find_agent_phone_from_api(search_value, api_agents_cache, crm_id=item['id'])
+                if contact_phone:
+                    item['contact_phone'] = contact_phone
+            else:  # krisha
+                # Поиск имени в API
+                contact_name = find_agent_name_by_phone_from_api(search_value, api_agents_cache)
+                if contact_name:
+                    item['contact_name'] = contact_name
+    
+    # Пересчитываем контакты для статистики
+    for item in paginated_items:
+        
+        # Удаляем временные поля
+        item.pop('_mop', None)
+        item.pop('_stats_agent_given', None)
+        
+        # Подсчитываем статистику
+        contact_name = item.get('contact_name')
+        contact_phone = item.get('contact_phone')
+        if contact_phone is None and contact_name is not None:
+            stats_phone_null_name_not_null += 1
+        elif contact_phone is not None and contact_name is None:
+            stats_phone_not_null_name_null += 1
+        elif contact_phone is None and contact_name is None:
+            stats_both_null += 1
+        else:
+            stats_both_not_null += 1
+    
+    
     # Преобразуем в PropertyResponse
     response_items = [
         PropertyResponse(
@@ -321,7 +609,8 @@ async def search_properties(
             category=item['category'],
             score=item['score'],
             krisha_id=item['krisha_id'],
-            contact=item['contact'],
+            contact_name=item['contact_name'],
+            contact_phone=item['contact_phone'],
             phones=item['phones']
         )
         for item in paginated_items

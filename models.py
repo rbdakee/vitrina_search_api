@@ -99,3 +99,17 @@ class ParsedProperty(Base):
     
     def __repr__(self):
         return f"<ParsedProperty(vitrina_id={self.vitrina_id}, complex='{self.complex}', address='{self.address}')>"
+
+
+class VitrinaAgent(Base):
+    """
+    Модель для таблицы vitrina_agents.
+    Содержит информацию об агентах Витрины.
+    """
+    __tablename__ = "vitrina_agents"
+    
+    agent_phone = Column(String(50), primary_key=True, comment="Телефон агента (PRIMARY KEY)")
+    full_name = Column(String(255), nullable=True, comment="Полное имя агента (обычно 2 слова)")
+    
+    def __repr__(self):
+        return f"<VitrinaAgent(agent_phone='{self.agent_phone}', full_name='{self.full_name}')>"

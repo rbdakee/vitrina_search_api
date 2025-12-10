@@ -22,7 +22,8 @@ class PropertyResponse(BaseModel):
     category: Optional[str] = Field(None, description="Категория объекта", example="A")
     score: Optional[float] = Field(None, description="Рейтинг объекта (только для Витрины)", example=8.4)
     krisha_id: Optional[str] = Field(None, description="ID на Крыше (только для Крыши)", example="12345")
-    contact: Optional[str] = Field(None, description="Контакт: МОП для Витрины, stats_agent_given для Крыши", example="МОП: +7 777 123 4567")
+    contact_name: Optional[str] = Field(None, description="Имя контакта: mop для Витрины, full_name из vitrina_agents для Крыши", example="Жукенова Енлик Арсеновна")
+    contact_phone: Optional[str] = Field(None, description="Телефон контакта: из vitrina_agents для Витрины, stats_agent_given для Крыши", example="+7 777 123 4567")
     phones: Optional[str] = Field(None, description="Телефоны (только для Крыши)", example="+7 777 123 4567, +7 777 765 4321")
 
     class Config:
@@ -39,7 +40,8 @@ class PropertyResponse(BaseModel):
                 "score": 8.4,
                 "category": "A",
                 "krisha_id": None,
-                "contact": "МОП: +7 777 123 4567",
+                "contact_name": "Жукенова Енлик Арсеновна",
+                "contact_phone": "+7 777 123 4567",
                 "phones": None
             }
         }
@@ -169,7 +171,8 @@ class PropertySearchResponse(BaseModel):
                         "score": 8.4,
                         "category": "A",
                         "krisha_id": None,
-                        "contact": "МОП: +7 777 123 4567",
+                        "contact_name": "Жукенова Енлик Арсеновна",
+                        "contact_phone": "+7 777 123 4567",
                         "phones": None
                     },
                     {
@@ -183,7 +186,8 @@ class PropertySearchResponse(BaseModel):
                         "score": 9.5,
                         "category": "B",
                         "krisha_id": None,
-                        "contact": "МОП: +7 777 234 5678",
+                        "contact_name": "Иванов Иван Петрович",
+                        "contact_phone": "+7 777 234 5678",
                         "phones": None
                     },
                     {
@@ -197,7 +201,8 @@ class PropertySearchResponse(BaseModel):
                         "score": None,
                         "category": "A",
                         "krisha_id": "67890",
-                        "contact": "Иван Иванов",
+                        "contact_name": "Жукенова Енлик",
+                        "contact_phone": "+7 777 345 6789",
                         "phones": "+7 777 345 6789, +7 777 456 7890"
                     }
                 ],
