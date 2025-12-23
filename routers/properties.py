@@ -238,7 +238,7 @@ async def fetch_agents_from_api() -> List[Dict]:
     return []
 
 
-async def check_object_validity(crm_id: str, client: httpx.AsyncClient, headers: dict) -> Tuple[bool, bool]:
+async def check_object_validity(crm_id: str, client: httpx.AsyncClient, headers: dict, max_retries: int = 2) -> Tuple[bool, bool]:
     """
     Проверяет объект через API dm.jurta.kz:
     1. Не архивирован ли (expired: false)
@@ -249,6 +249,7 @@ async def check_object_validity(crm_id: str, client: httpx.AsyncClient, headers:
         crm_id: ID объекта из Витрины (crm_id)
         client: Переиспользуемый HTTP клиент
         headers: Заголовки с авторизацией
+        max_retries: Максимальное количество повторных попыток при таймаутах (по умолчанию 2)
         
     Returns:
         (is_valid, has_photos) - кортеж:
@@ -258,27 +259,39 @@ async def check_object_validity(crm_id: str, client: httpx.AsyncClient, headers:
     if not crm_id:
         return (False, False)
     
-    try:
-        response = await client.get(f"{APPLICATION_VIEW_API_URL}/{crm_id}", headers=headers, timeout=5.0)
-        if response.status_code == 200:
-            data = response.json()
-            expired = data.get("expired", False)
-            is_sold = data.get("isSold", False)
-            photo_id_list = data.get("photoIdList", [])
-            has_photos = bool(photo_id_list and len(photo_id_list) > 0)
-            
-            # Объект валиден если не архивирован И есть фотографии И не продан
-            is_valid = not expired and has_photos and not is_sold
-            return (is_valid, has_photos)
-        # Если статус не 200, считаем объект невалидным
-        return (False, False)
-    except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError):
-        # При сетевых ошибках/таймаутах - считаем объект валидным (не исключаем)
-        # Это предотвращает потерю объектов из-за временных проблем с сетью
-        return (True, True)
-    except Exception:
-        # При других ошибках (например, 500, 404) - исключаем объект
-        return (False, False)
+    last_exception = None
+    
+    # Делаем до max_retries + 1 попыток (первая попытка + retries)
+    for attempt in range(max_retries + 1):
+        try:
+            response = await client.get(f"{APPLICATION_VIEW_API_URL}/{crm_id}", headers=headers, timeout=5.0)
+            if response.status_code == 200:
+                data = response.json()
+                expired = data.get("expired", False)
+                is_sold = data.get("isSold", False)
+                photo_id_list = data.get("photoIdList", [])
+                has_photos = bool(photo_id_list and len(photo_id_list) > 0)
+                
+                # Объект валиден если не архивирован И есть фотографии И не продан
+                is_valid = not expired and has_photos and not is_sold
+                return (is_valid, has_photos)
+            # Если статус не 200, считаем объект невалидным (не повторяем)
+            return (False, False)
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError) as e:
+            last_exception = e
+            # Если это не последняя попытка, ждем немного и повторяем
+            if attempt < max_retries:
+                await asyncio.sleep(0.5 * (attempt + 1))  # Экспоненциальная задержка: 0.5s, 1s
+                continue
+            # Если все попытки исчерпаны, считаем объект валидным (не исключаем)
+            # Это предотвращает потерю объектов из-за временных проблем с сетью
+            return (True, True)
+        except Exception:
+            # При других ошибках (например, 500, 404) - исключаем объект (не повторяем)
+            return (False, False)
+    
+    # Если дошли сюда (не должно случиться), возвращаем валидным
+    return (True, True)
 
 
 async def filter_invalid_items(items: List[Dict], batch_size: int = 100, max_concurrent: int = 50) -> List[Dict]:
