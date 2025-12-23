@@ -238,61 +238,56 @@ async def fetch_agents_from_api() -> List[Dict]:
     return []
 
 
-async def check_object_validity(crm_id: str) -> Tuple[bool, bool]:
+async def check_object_validity(crm_id: str, client: httpx.AsyncClient, headers: dict) -> Tuple[bool, bool]:
     """
     Проверяет объект через API dm.jurta.kz:
     1. Не архивирован ли (expired: false)
     2. Есть ли фотографии (photoIdList не пустой)
+    3. Не продан ли (isSold: false)
     
     Args:
         crm_id: ID объекта из Витрины (crm_id)
+        client: Переиспользуемый HTTP клиент
+        headers: Заголовки с авторизацией
         
     Returns:
         (is_valid, has_photos) - кортеж:
-        - is_valid: True если объект валиден (не архивирован и есть фото)
+        - is_valid: True если объект валиден (не архивирован, есть фото, не продан)
         - has_photos: True если есть фотографии
     """
     if not crm_id:
         return (False, False)
     
-    # Получаем токен из переменных окружения
-    token = os.getenv("APPLICATION_VIEW_API_TOKEN")
-    if not token:
-        # Если токен не найден, считаем объект невалидным
-        return (False, False)
-    
-    headers = {
-        "accept": "*/*",
-        "Authorization": f"Bearer {token}"
-    }
-    
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(f"{APPLICATION_VIEW_API_URL}/{crm_id}", headers=headers)
-            if response.status_code == 200:
-                data = response.json()
-                expired = data.get("expired", False)
-                photo_id_list = data.get("photoIdList", [])
-                has_photos = bool(photo_id_list and len(photo_id_list) > 0)
-                
-                # Объект валиден если не архивирован И есть фотографии
-                is_valid = not expired and has_photos
-                return (is_valid, has_photos)
-            return (False, False)
+        response = await client.get(f"{APPLICATION_VIEW_API_URL}/{crm_id}", headers=headers, timeout=2.0)
+        if response.status_code == 200:
+            data = response.json()
+            expired = data.get("expired", False)
+            is_sold = data.get("isSold", False)
+            photo_id_list = data.get("photoIdList", [])
+            has_photos = bool(photo_id_list and len(photo_id_list) > 0)
+            
+            # Объект валиден если не архивирован И есть фотографии И не продан
+            is_valid = not expired and has_photos and not is_sold
+            return (is_valid, has_photos)
+        return (False, False)
     except Exception:
         # В случае ошибки считаем, что объект не валиден (исключаем из результатов)
         return (False, False)
 
 
-async def filter_invalid_items(items: List[Dict]) -> List[Dict]:
+async def filter_invalid_items(items: List[Dict], batch_size: int = 100, max_concurrent: int = 50) -> List[Dict]:
     """
     Фильтрует невалидные объекты из списка.
-    Проверяет только объекты из Витрины:
+    Проверяет только объекты из Витрины батчами (пакетами) для оптимизации:
     - Исключает архивированные (expired: true)
     - Исключает объекты без фотографий (photoIdList пустой)
+    - Исключает проданные объекты (isSold: true)
     
     Args:
-        items: Список объектов после пагинации
+        items: Список всех объектов (до пагинации)
+        batch_size: Размер батча для обработки (по умолчанию 100)
+        max_concurrent: Максимальное количество одновременных запросов (по умолчанию 50)
         
     Returns:
         Отфильтрованный список без невалидных объектов
@@ -303,15 +298,43 @@ async def filter_invalid_items(items: List[Dict]) -> List[Dict]:
     if not vitrina_items:
         return items
     
-    # Проверяем все объекты параллельно
-    validity_checks = await asyncio.gather(*[
-        check_object_validity(crm_id) for _, crm_id in vitrina_items
-    ])
+    # Получаем токен из переменных окружения
+    token = os.getenv("APPLICATION_VIEW_API_TOKEN")
+    if not token:
+        # Если токен не найден, исключаем все объекты из Витрины
+        return [item for item in items if item['source'] != 'Витрина']
     
-    # Создаем множество невалидных ID (архивированные или без фото)
-    invalid_ids = {
-        crm_id for (_, crm_id), (is_valid, _) in zip(vitrina_items, validity_checks) if not is_valid
+    headers = {
+        "accept": "*/*",
+        "Authorization": f"Bearer {token}"
     }
+    
+    # Создаем один HTTP клиент для всех запросов (connection pooling)
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(2.0, connect=1.0),
+        limits=httpx.Limits(max_keepalive_connections=20, max_connections=max_concurrent)
+    ) as client:
+        invalid_ids = set()
+        semaphore = asyncio.Semaphore(max_concurrent)
+        
+        async def check_with_semaphore(crm_id: str):
+            async with semaphore:
+                return await check_object_validity(crm_id, client, headers)
+        
+        # Разбиваем на батчи для обработки
+        for batch_start in range(0, len(vitrina_items), batch_size):
+            batch = vitrina_items[batch_start:batch_start + batch_size]
+            
+            # Проверяем батч параллельно с ограничением через semaphore
+            validity_checks = await asyncio.gather(*[
+                check_with_semaphore(crm_id) for _, crm_id in batch
+            ])
+            
+            # Собираем невалидные ID из батча
+            batch_invalid_ids = {
+                crm_id for (_, crm_id), (is_valid, _) in zip(batch, validity_checks) if not is_valid
+            }
+            invalid_ids.update(batch_invalid_ids)
     
     # Фильтруем объекты
     filtered_items = [
@@ -553,6 +576,15 @@ async def search_properties(
             '_sort_key': (1, prop.stats_object_category or '', 0, prop.sell_price or 0, -(prop.area or 0))
         })
     
+    # ========== ФИЛЬТРАЦИЯ НЕВАЛИДНЫХ ОБЪЕКТОВ (ДО СОРТИРОВКИ И ПАГИНАЦИИ) ==========
+    # Проверяем все объекты из Витрины батчами (архивированные, без фото, проданные)
+    # Это выполняется для ВСЕХ объектов, а не только для тех, что попадут на страницу
+    # batch_size=100 - размер батча для обработки, max_concurrent=50 - максимум одновременных запросов
+    items = await filter_invalid_items(items, batch_size=400, max_concurrent=200)
+    
+    # Пересчитываем total ПОСЛЕ фильтрации, чтобы он соответствовал реальному количеству валидных объектов
+    total = len(items)
+    
     # Сортировка: сначала Витрина (0), потом Крыша (1), затем по существующим правилам
     if order_by:
         if order_by.startswith("-"):
@@ -680,11 +712,6 @@ async def search_properties(
         else:
             stats_both_not_null += 1
     
-    # Фильтруем невалидные объекты (только для Витрины):
-    # - архивированные (expired: true)
-    # - без фотографий (photoIdList пустой)
-    filtered_items = await filter_invalid_items(paginated_items)
-    
     # Преобразуем в PropertyResponse
     response_items = [
         PropertyResponse(
@@ -702,7 +729,7 @@ async def search_properties(
             contact_phone=item['contact_phone'],
             phones=item['phones']
         )
-        for item in filtered_items
+        for item in paginated_items
     ]
     
     return PropertySearchResponse(
