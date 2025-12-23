@@ -4,7 +4,7 @@
 """
 import os
 import asyncio
-from typing import Optional, Union, List, Dict
+from typing import Optional, Union, List, Dict, Tuple
 
 import httpx
 from fastapi import APIRouter, Depends, Query
@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 AGENTS_API_URL = "https://vm.jurta.kz/api/agents/getAgentsToAssign"
+APPLICATION_VIEW_API_URL = "https://dm.jurta.kz/api/application-view"
 
 def parse_optional_int(value: Optional[Union[int, str]]) -> Optional[int]:
     """Преобразует значение в int или возвращает None для пустых строк"""
@@ -235,6 +236,90 @@ async def fetch_agents_from_api() -> List[Dict]:
             return []
     
     return []
+
+
+async def check_object_validity(crm_id: str) -> Tuple[bool, bool]:
+    """
+    Проверяет объект через API dm.jurta.kz:
+    1. Не архивирован ли (expired: false)
+    2. Есть ли фотографии (photoIdList не пустой)
+    
+    Args:
+        crm_id: ID объекта из Витрины (crm_id)
+        
+    Returns:
+        (is_valid, has_photos) - кортеж:
+        - is_valid: True если объект валиден (не архивирован и есть фото)
+        - has_photos: True если есть фотографии
+    """
+    if not crm_id:
+        return (False, False)
+    
+    # Получаем токен из переменных окружения
+    token = os.getenv("APPLICATION_VIEW_API_TOKEN")
+    if not token:
+        # Если токен не найден, считаем объект невалидным
+        return (False, False)
+    
+    headers = {
+        "accept": "*/*",
+        "Authorization": f"Bearer {token}"
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{APPLICATION_VIEW_API_URL}/{crm_id}", headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                expired = data.get("expired", False)
+                photo_id_list = data.get("photoIdList", [])
+                has_photos = bool(photo_id_list and len(photo_id_list) > 0)
+                
+                # Объект валиден если не архивирован И есть фотографии
+                is_valid = not expired and has_photos
+                return (is_valid, has_photos)
+            return (False, False)
+    except Exception:
+        # В случае ошибки считаем, что объект не валиден (исключаем из результатов)
+        return (False, False)
+
+
+async def filter_invalid_items(items: List[Dict]) -> List[Dict]:
+    """
+    Фильтрует невалидные объекты из списка.
+    Проверяет только объекты из Витрины:
+    - Исключает архивированные (expired: true)
+    - Исключает объекты без фотографий (photoIdList пустой)
+    
+    Args:
+        items: Список объектов после пагинации
+        
+    Returns:
+        Отфильтрованный список без невалидных объектов
+    """
+    # Собираем все crm_id для проверки (только для Витрины)
+    vitrina_items = [(i, i['id']) for i in items if i['source'] == 'Витрина']
+    
+    if not vitrina_items:
+        return items
+    
+    # Проверяем все объекты параллельно
+    validity_checks = await asyncio.gather(*[
+        check_object_validity(crm_id) for _, crm_id in vitrina_items
+    ])
+    
+    # Создаем множество невалидных ID (архивированные или без фото)
+    invalid_ids = {
+        crm_id for (_, crm_id), (is_valid, _) in zip(vitrina_items, validity_checks) if not is_valid
+    }
+    
+    # Фильтруем объекты
+    filtered_items = [
+        item for item in items 
+        if not (item['source'] == 'Витрина' and item['id'] in invalid_ids)
+    ]
+    
+    return filtered_items
 
 router = APIRouter(
     prefix="/api/properties",
@@ -595,6 +680,10 @@ async def search_properties(
         else:
             stats_both_not_null += 1
     
+    # Фильтруем невалидные объекты (только для Витрины):
+    # - архивированные (expired: true)
+    # - без фотографий (photoIdList пустой)
+    filtered_items = await filter_invalid_items(paginated_items)
     
     # Преобразуем в PropertyResponse
     response_items = [
@@ -613,7 +702,7 @@ async def search_properties(
             contact_phone=item['contact_phone'],
             phones=item['phones']
         )
-        for item in paginated_items
+        for item in filtered_items
     ]
     
     return PropertySearchResponse(
