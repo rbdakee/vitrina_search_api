@@ -259,7 +259,7 @@ async def check_object_validity(crm_id: str, client: httpx.AsyncClient, headers:
         return (False, False)
     
     try:
-        response = await client.get(f"{APPLICATION_VIEW_API_URL}/{crm_id}", headers=headers, timeout=2.0)
+        response = await client.get(f"{APPLICATION_VIEW_API_URL}/{crm_id}", headers=headers, timeout=5.0)
         if response.status_code == 200:
             data = response.json()
             expired = data.get("expired", False)
@@ -270,9 +270,14 @@ async def check_object_validity(crm_id: str, client: httpx.AsyncClient, headers:
             # Объект валиден если не архивирован И есть фотографии И не продан
             is_valid = not expired and has_photos and not is_sold
             return (is_valid, has_photos)
+        # Если статус не 200, считаем объект невалидным
         return (False, False)
+    except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError):
+        # При сетевых ошибках/таймаутах - считаем объект валидным (не исключаем)
+        # Это предотвращает потерю объектов из-за временных проблем с сетью
+        return (True, True)
     except Exception:
-        # В случае ошибки считаем, что объект не валиден (исключаем из результатов)
+        # При других ошибках (например, 500, 404) - исключаем объект
         return (False, False)
 
 
@@ -311,7 +316,7 @@ async def filter_invalid_items(items: List[Dict], batch_size: int = 100, max_con
     
     # Создаем один HTTP клиент для всех запросов (connection pooling)
     async with httpx.AsyncClient(
-        timeout=httpx.Timeout(2.0, connect=1.0),
+        timeout=httpx.Timeout(5.0, connect=2.0),
         limits=httpx.Limits(max_keepalive_connections=20, max_connections=max_concurrent)
     ) as client:
         invalid_ids = set()
@@ -580,7 +585,8 @@ async def search_properties(
     # Проверяем все объекты из Витрины батчами (архивированные, без фото, проданные)
     # Это выполняется для ВСЕХ объектов, а не только для тех, что попадут на страницу
     # batch_size=100 - размер батча для обработки, max_concurrent=50 - максимум одновременных запросов
-    items = await filter_invalid_items(items, batch_size=400, max_concurrent=200)
+    # Уменьшено max_concurrent до 50 для стабильности (слишком много параллельных запросов может перегрузить API)
+    items = await filter_invalid_items(items, batch_size=100, max_concurrent=50)
     
     # Пересчитываем total ПОСЛЕ фильтрации, чтобы он соответствовал реальному количеству валидных объектов
     total = len(items)
