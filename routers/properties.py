@@ -711,10 +711,13 @@ async def search_properties(
     
     # ========== ЗАПРОС К ТАБЛИЦЕ parsed_properties (Крыша) ==========
     krisha_conditions = []
-    # Исключаем только объекты со статусом "Архив", но разрешаем NULL
+    # Исключаем объекты со статусом "Архив" и "Отказ", но разрешаем NULL
     krisha_conditions.append(
         or_(
-            ParsedProperty.stats_object_status != "Архив",
+            and_(
+                ParsedProperty.stats_object_status != "Архив",
+                ParsedProperty.stats_object_status != "Отказ"
+            ),
             ParsedProperty.stats_object_status.is_(None)
         )
     )
@@ -811,6 +814,7 @@ async def search_properties(
             'contact_phone': None,  # Будет заполнено после пагинации
             'phones': prop.phones,
             '_stats_agent_given': prop.stats_agent_given,  # Сохраняем для поиска контакта
+            '_stats_object_status': prop.stats_object_status,  # Сохраняем статус для фильтрации krisha_id
             '_sort_key': (1, prop.stats_object_category or '', 0, prop.sell_price or 0, -(prop.area or 0))
         })
     
@@ -945,6 +949,12 @@ async def search_properties(
         # Удаляем временные поля
         item.pop('_mop', None)
         item.pop('_stats_agent_given', None)
+        
+        # Для объектов из Крыши со статусом "Договор" устанавливаем krisha_id = "agent_taken"
+        if item['source'] == 'Крыша':
+            stats_object_status = item.pop('_stats_object_status', None)
+            if stats_object_status == 'Договор':
+                item['krisha_id'] = "agent_taken"
         
         # Подсчитываем статистику
         contact_name = item.get('contact_name')
