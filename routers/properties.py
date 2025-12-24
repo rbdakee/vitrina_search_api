@@ -479,8 +479,9 @@ async def filter_and_paginate_items(
 ) -> Tuple[List[Dict], int]:
     """
     Фильтрует объекты из Витрины с проверкой валидности и применяет пагинацию.
-    Проверяет объекты батчами параллельно пока не наберет нужное количество валидных.
-    Это значительно снижает количество API запросов и ускоряет обработку.
+    Проверяет объекты из Витрины батчами параллельно пока не наберет offset + limit валидных.
+    Если объектов из Витрины не хватает, добавляет объекты из Крыши (без проверки).
+    Объекты из Крыши всегда валидны и не требуют проверки через API.
     
     Args:
         items: Список всех объектов (уже отсортированных)
@@ -516,33 +517,58 @@ async def filter_and_paginate_items(
     ) as client:
         semaphore = asyncio.Semaphore(max_concurrent)
         valid_vitrina_items = []
-        target_count = offset + limit + max(10, limit // 10)
+        target_count = offset + limit
         
         async def check_with_semaphore(crm_id: str):
             async with semaphore:
                 return await check_object_validity(crm_id, client, headers)
         
         # Проверяем объекты из Витрины батчами параллельно
-        for batch_start in range(0, len(vitrina_items), batch_size):
-            # Берем батч объектов
-            batch = vitrina_items[batch_start:batch_start + batch_size]
+        vitrina_batch = []
+        checked_vitrina = {}  # {original_idx: (item, is_valid)}
+        
+        for item, original_idx in vitrina_items:
+            vitrina_batch.append((item, original_idx))
             
-            # Проверяем батч параллельно
-            validity_checks = await asyncio.gather(*[
-                check_with_semaphore(item['id']) for item, _ in batch
-            ])
+            # Когда накопили батч, проверяем его параллельно
+            if len(vitrina_batch) >= batch_size:
+                validity_checks = await asyncio.gather(*[
+                    check_with_semaphore(item['id']) for item, _ in vitrina_batch
+                ])
+                
+                for (item, idx), (is_valid, _) in zip(vitrina_batch, validity_checks):
+                    checked_vitrina[idx] = (item, is_valid)
+                    if is_valid:
+                        valid_vitrina_items.append((item, idx))
+                
+                vitrina_batch = []
             
-            # Собираем валидные объекты из батча
-            for (item, original_idx), (is_valid, _) in zip(batch, validity_checks):
-                if is_valid:
-                    valid_vitrina_items.append((item, original_idx))
-            
-            # Если уже набрали достаточно валидных, можно остановиться
+            # Останавливаемся, когда набрали достаточно валидных из Витрины
             if len(valid_vitrina_items) >= target_count:
                 break
         
-        # Объединяем валидные объекты из Витрины и все объекты из Крыши
-        all_valid_items = valid_vitrina_items + krisha_items
+        # Проверяем оставшиеся объекты из Витрины, если нужно
+        if vitrina_batch and len(valid_vitrina_items) < target_count:
+            validity_checks = await asyncio.gather(*[
+                check_with_semaphore(item['id']) for item, _ in vitrina_batch
+            ])
+            
+            for (item, idx), (is_valid, _) in zip(vitrina_batch, validity_checks):
+                checked_vitrina[idx] = (item, is_valid)
+                if is_valid:
+                    valid_vitrina_items.append((item, idx))
+        
+        # Если объектов из Витрины не хватает, добавляем объекты из Крыши
+        # Объекты из Крыши всегда валидны и не требуют проверки через API
+        all_valid_items = valid_vitrina_items.copy()
+        
+        if len(valid_vitrina_items) < target_count:
+            # Добавляем объекты из Крыши в правильном порядке сортировки
+            # Берем столько, сколько нужно для заполнения до target_count
+            needed_count = target_count - len(valid_vitrina_items)
+            
+            # Объекты из Крыши уже отсортированы, добавляем их в правильном порядке
+            all_valid_items.extend(krisha_items[:needed_count])
         
         # Сортируем по оригинальному индексу для сохранения порядка сортировки
         all_valid_items.sort(key=lambda x: x[1])
