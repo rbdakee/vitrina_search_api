@@ -469,6 +469,90 @@ async def filter_invalid_items(items: List[Dict], batch_size: int = 50, max_conc
     
     return filtered_items
 
+
+async def filter_and_paginate_items(
+    items: List[Dict], 
+    offset: int, 
+    limit: int,
+    max_concurrent: int = 10,
+    batch_size: int = 20
+) -> Tuple[List[Dict], int]:
+    """
+    Фильтрует объекты из Витрины с проверкой валидности и применяет пагинацию.
+    Проверяет объекты батчами параллельно пока не наберет нужное количество валидных.
+    Это значительно снижает количество API запросов и ускоряет обработку.
+    
+    Args:
+        items: Список всех объектов (уже отсортированных)
+        offset: Смещение для пагинации
+        limit: Количество объектов на странице
+        max_concurrent: Максимальное количество одновременных запросов (по умолчанию 10)
+        batch_size: Размер батча для параллельной проверки (по умолчанию 20)
+        
+    Returns:
+        Кортеж (отфильтрованные объекты для страницы, общее количество из БД)
+    """
+    # Разделяем объекты на Витрину и Крышу
+    vitrina_items = [(i, idx) for idx, i in enumerate(items) if i['source'] == 'Витрина']
+    krisha_items = [(i, idx) for idx, i in enumerate(items) if i['source'] == 'Крыша']
+    
+    # Получаем токен из переменных окружения
+    token = os.getenv("APPLICATION_VIEW_API_TOKEN")
+    if not token:
+        # Если токен не найден, исключаем все объекты из Витрины
+        # Просто возвращаем объекты из Крыши с пагинацией
+        paginated = krisha_items[offset:offset + limit]
+        return [item for item, _ in paginated], len(items)
+    
+    headers = {
+        "accept": "*/*",
+        "Authorization": f"Bearer {token}"
+    }
+    
+    # Создаем один HTTP клиент для всех запросов
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(5.0, connect=2.0),
+        limits=httpx.Limits(max_keepalive_connections=10, max_connections=max_concurrent)
+    ) as client:
+        semaphore = asyncio.Semaphore(max_concurrent)
+        valid_vitrina_items = []
+        target_count = offset + limit + max(10, limit // 10)
+        
+        async def check_with_semaphore(crm_id: str):
+            async with semaphore:
+                return await check_object_validity(crm_id, client, headers)
+        
+        # Проверяем объекты из Витрины батчами параллельно
+        for batch_start in range(0, len(vitrina_items), batch_size):
+            # Берем батч объектов
+            batch = vitrina_items[batch_start:batch_start + batch_size]
+            
+            # Проверяем батч параллельно
+            validity_checks = await asyncio.gather(*[
+                check_with_semaphore(item['id']) for item, _ in batch
+            ])
+            
+            # Собираем валидные объекты из батча
+            for (item, original_idx), (is_valid, _) in zip(batch, validity_checks):
+                if is_valid:
+                    valid_vitrina_items.append((item, original_idx))
+            
+            # Если уже набрали достаточно валидных, можно остановиться
+            if len(valid_vitrina_items) >= target_count:
+                break
+        
+        # Объединяем валидные объекты из Витрины и все объекты из Крыши
+        all_valid_items = valid_vitrina_items + krisha_items
+        
+        # Сортируем по оригинальному индексу для сохранения порядка сортировки
+        all_valid_items.sort(key=lambda x: x[1])
+        all_valid_items = [item for item, _ in all_valid_items]
+        
+        # Применяем пагинацию
+        paginated = all_valid_items[offset:offset + limit]
+        
+        return paginated, len(items)
+
 router = APIRouter(
     prefix="/api/properties",
     tags=["Properties"],
@@ -704,16 +788,8 @@ async def search_properties(
             '_sort_key': (1, prop.stats_object_category or '', 0, prop.sell_price or 0, -(prop.area or 0))
         })
     
-    # ========== ФИЛЬТРАЦИЯ НЕВАЛИДНЫХ ОБЪЕКТОВ (ДО СОРТИРОВКИ И ПАГИНАЦИИ) ==========
-    # Проверяем все объекты из Витрины батчами (архивированные, без фото, проданные)
-    # Это выполняется для ВСЕХ объектов, а не только для тех, что попадут на страницу
-    # batch_size=50, max_concurrent=20 - уменьшено для снижения нагрузки на CPU
-    items = await filter_invalid_items(items, batch_size=50, max_concurrent=20)
-    
-    # Пересчитываем total ПОСЛЕ фильтрации, чтобы он соответствовал реальному количеству валидных объектов
-    total = len(items)
-    
-    # Сортировка: сначала Витрина (0), потом Крыша (1), затем по существующим правилам
+    # ========== СОРТИРОВКА (ПЕРЕД ФИЛЬТРАЦИЕЙ) ==========
+    # Сначала сортируем все объекты, затем будем проверять только те, что нужны для страницы
     if order_by:
         if order_by.startswith("-"):
             field_name = order_by[1:]
@@ -762,8 +838,16 @@ async def search_properties(
             -(x.get('area') or 0)  # area по убыванию
         ))
     
-    # Применяем пагинацию
-    paginated_items = items[offset:offset + limit]
+    # ========== ФИЛЬТРАЦИЯ С ПАГИНАЦИЕЙ ==========
+    # Проверяем объекты батчами параллельно пока не наберем нужное количество валидных
+    # Это значительно снижает количество API запросов и ускоряет обработку
+    paginated_items, total = await filter_and_paginate_items(
+        items, 
+        offset=offset, 
+        limit=limit,
+        max_concurrent=10,
+        batch_size=20
+    )
     
     # ========== ПОИСК КОНТАКТОВ ДЛЯ ОБЪЕКТОВ ПОСЛЕ ПАГИНАЦИИ ==========
     # Сначала ищем в БД (быстро), затем в API как fallback (только для объектов, где не нашли)
