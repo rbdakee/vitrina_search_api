@@ -47,6 +47,39 @@ def _normalize_words(text: str) -> List[str]:
     return [word.strip().lower() for word in text.split() if word and word.strip()]
 
 
+def prepare_agents_indexes(db_agents: list) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """
+    Создает индексы для быстрого поиска агентов (O(1) вместо O(n)).
+    Возвращает два словаря:
+    - phone_to_name: телефон -> имя (для Крыши, быстрый поиск по телефону)
+    - name_to_phone: нормализованное имя -> телефон (для Витрины, быстрый поиск по имени)
+    
+    Args:
+        db_agents: Список агентов из таблицы vitrina_agents
+        
+    Returns:
+        Кортеж (phone_to_name, name_to_phone)
+    """
+    phone_to_name = {}
+    name_to_phone = {}
+    
+    for agent in db_agents:
+        if agent.agent_phone:
+            phone_clean = agent.agent_phone.strip()
+            if agent.full_name:
+                phone_to_name[phone_clean] = agent.full_name
+                # Создаем индекс по нормализованному имени
+                name_words = _normalize_words(agent.full_name)
+                if name_words:
+                    # Индексируем по комбинации слов (сортируем для независимости от порядка)
+                    name_key = " ".join(sorted(name_words))
+                    # Сохраняем только лучшее совпадение (больше слов = лучше)
+                    if name_key not in name_to_phone or len(name_words) > len(_normalize_words(name_to_phone.get(name_key, "").split()[0] if name_to_phone.get(name_key) else "")):
+                        name_to_phone[name_key] = phone_clean
+    
+    return phone_to_name, name_to_phone
+
+
 def _make_full_name(agent: Dict, reverse: bool = False) -> Optional[str]:
     """
     Создает полное имя из surname и name.
@@ -66,6 +99,8 @@ def find_agent_phone_from_db(mop: Optional[str], db_agents: list, crm_id: str = 
     Находит телефон агента используя список агентов из таблицы vitrina_agents (БД).
     Ищет совпадение: если full_name состоит из 2 слов, ищет эти слова в mop (обычно 3 слова).
     Если несколько совпадений, выбирает то, где больше совпадений.
+    
+    DEPRECATED: Используйте find_agent_phone_from_db_optimized для лучшей производительности.
     
     Args:
         mop: Значение из properties.mop (обычно 3 слова)
@@ -102,9 +137,47 @@ def find_agent_phone_from_db(mop: Optional[str], db_agents: list, crm_id: str = 
     return best_match
 
 
+def find_agent_phone_from_db_optimized(mop: Optional[str], name_to_phone: Dict[str, str]) -> Optional[str]:
+    """
+    Быстрый поиск телефона агента по индексу (O(1) вместо O(n)).
+    Ищет совпадение: если full_name состоит из 2 слов, ищет эти слова в mop (обычно 3 слова).
+    
+    Args:
+        mop: Значение из properties.mop (обычно 3 слова)
+        name_to_phone: Индекс нормализованных имен -> телефоны
+        
+    Returns:
+        agent_phone или None если не найдено
+    """
+    if not mop or not mop.strip():
+        return None
+    
+    mop_words = _normalize_words(mop)
+    if not mop_words or len(mop_words) < 2:
+        return None
+    
+    best_match = None
+    best_match_score = 0
+    
+    # Проверяем все возможные комбинации из 2 слов из mop
+    for i in range(len(mop_words)):
+        for j in range(i + 1, len(mop_words)):
+            # Создаем ключ из отсортированных слов
+            key = " ".join(sorted([mop_words[i], mop_words[j]]))
+            if key in name_to_phone:
+                score = 2
+                if score > best_match_score:
+                    best_match = name_to_phone[key]
+                    best_match_score = score
+    
+    return best_match
+
+
 def find_agent_name_by_phone_from_db(agent_phone: Optional[str], db_agents: list) -> Optional[str]:
     """
     Находит имя агента по телефону из таблицы vitrina_agents (БД).
+    
+    DEPRECATED: Используйте phone_to_name.get(phone) для лучшей производительности.
     
     Args:
         agent_phone: Телефон агента (stats_agent_given для Крыши)
@@ -173,9 +246,43 @@ def find_agent_phone_from_api(mop: Optional[str], api_agents_cache: List[Dict], 
     return best_match
 
 
+def prepare_api_agents_indexes(api_agents_cache: List[Dict]) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """
+    Создает индексы для быстрого поиска агентов из API (O(1) вместо O(n)).
+    
+    Args:
+        api_agents_cache: Список агентов из внешнего API
+        
+    Returns:
+        Кортеж (phone_to_name, name_to_phone)
+    """
+    phone_to_name = {}
+    name_to_phone = {}
+    
+    for agent in api_agents_cache:
+        login = agent.get("login")
+        if not login:
+            continue
+        
+        phone_clean = login.strip()
+        full_name = _make_full_name(agent)
+        if full_name:
+            phone_to_name[phone_clean] = full_name
+            # Создаем индекс по нормализованному имени
+            name_words = _normalize_words(full_name)
+            if name_words:
+                name_key = " ".join(sorted(name_words))
+                if name_key not in name_to_phone or len(name_words) > len(_normalize_words(name_to_phone.get(name_key, "").split()[0] if name_to_phone.get(name_key) else "")):
+                    name_to_phone[name_key] = phone_clean
+    
+    return phone_to_name, name_to_phone
+
+
 def find_agent_name_by_phone_from_api(agent_phone: Optional[str], api_agents_cache: List[Dict]) -> Optional[str]:
     """
     Находит имя агента по телефону из УЖЕ ЗАГРУЖЕННОГО кэша внешнего API (fallback).
+    
+    DEPRECATED: Используйте prepare_api_agents_indexes + phone_to_name.get() для лучшей производительности.
     
     Args:
         agent_phone: Телефон агента (stats_agent_given для Крыши)
@@ -294,7 +401,7 @@ async def check_object_validity(crm_id: str, client: httpx.AsyncClient, headers:
     return (True, True)
 
 
-async def filter_invalid_items(items: List[Dict], batch_size: int = 100, max_concurrent: int = 50) -> List[Dict]:
+async def filter_invalid_items(items: List[Dict], batch_size: int = 50, max_concurrent: int = 20) -> List[Dict]:
     """
     Фильтрует невалидные объекты из списка.
     Проверяет только объекты из Витрины батчами (пакетами) для оптимизации:
@@ -304,8 +411,8 @@ async def filter_invalid_items(items: List[Dict], batch_size: int = 100, max_con
     
     Args:
         items: Список всех объектов (до пагинации)
-        batch_size: Размер батча для обработки (по умолчанию 100)
-        max_concurrent: Максимальное количество одновременных запросов (по умолчанию 50)
+        batch_size: Размер батча для обработки (по умолчанию 50, уменьшено для снижения нагрузки)
+        max_concurrent: Максимальное количество одновременных запросов (по умолчанию 20, уменьшено для снижения нагрузки)
         
     Returns:
         Отфильтрованный список без невалидных объектов
@@ -551,6 +658,9 @@ async def search_properties(
     db_agents_result = await db.execute(db_agents_query)
     db_agents = db_agents_result.scalars().all()
     
+    # Создаем индексы для быстрого поиска (O(1) вместо O(n))
+    phone_to_name, name_to_phone = prepare_agents_indexes(db_agents)
+    
     # Преобразуем в унифицированный формат БЕЗ поиска контактов (для производительности)
     items = []
     
@@ -597,9 +707,8 @@ async def search_properties(
     # ========== ФИЛЬТРАЦИЯ НЕВАЛИДНЫХ ОБЪЕКТОВ (ДО СОРТИРОВКИ И ПАГИНАЦИИ) ==========
     # Проверяем все объекты из Витрины батчами (архивированные, без фото, проданные)
     # Это выполняется для ВСЕХ объектов, а не только для тех, что попадут на страницу
-    # batch_size=100 - размер батча для обработки, max_concurrent=50 - максимум одновременных запросов
-    # Уменьшено max_concurrent до 50 для стабильности (слишком много параллельных запросов может перегрузить API)
-    items = await filter_invalid_items(items, batch_size=100, max_concurrent=50)
+    # batch_size=50, max_concurrent=20 - уменьшено для снижения нагрузки на CPU
+    items = await filter_invalid_items(items, batch_size=50, max_concurrent=20)
     
     # Пересчитываем total ПОСЛЕ фильтрации, чтобы он соответствовал реальному количеству валидных объектов
     total = len(items)
@@ -666,13 +775,14 @@ async def search_properties(
     # Список объектов, которым нужен fallback к API
     need_api_fallback = []
     
-    # Первый проход: поиск в БД
+    # Первый проход: поиск в БД (используем оптимизированные индексы)
     for item in paginated_items:
         if item['source'] == 'Витрина':
             # Для Витрины: contact_name = mop, contact_phone из поиска в БД
             mop = item.get('_mop')
             contact_name = mop if mop else None
-            contact_phone = find_agent_phone_from_db(mop, db_agents, crm_id=item['id'])
+            # Используем оптимизированную функцию с индексами (O(1) вместо O(n))
+            contact_phone = find_agent_phone_from_db_optimized(mop, name_to_phone)
             
             # Если не нашли в БД, добавим в список для fallback к API
             if contact_phone is None and contact_name:
@@ -685,7 +795,8 @@ async def search_properties(
                 contact_phone = None
             else:
                 contact_phone = stats_agent_given.strip()
-                contact_name = find_agent_name_by_phone_from_db(contact_phone, db_agents)
+                # Используем индекс для быстрого поиска (O(1) вместо O(n))
+                contact_name = phone_to_name.get(contact_phone)
                 
                 # Если не нашли в БД, добавим в список для fallback к API
                 if contact_name is None:
@@ -696,21 +807,27 @@ async def search_properties(
         item['contact_phone'] = contact_phone
     
     # Второй проход: fallback к API (только если есть объекты, которым нужен fallback)
-    api_agents_cache = None
+    api_phone_to_name = {}
+    api_name_to_phone = {}
     if need_api_fallback:
         api_agents_cache = await fetch_agents_from_api()
+        if api_agents_cache:
+            # Создаем индексы для API агентов тоже
+            api_phone_to_name, api_name_to_phone = prepare_api_agents_indexes(api_agents_cache)
         
         for fallback_type, item, search_value in need_api_fallback:
             if fallback_type == 'vitrina':
-                # Поиск телефона в API
-                contact_phone = find_agent_phone_from_api(search_value, api_agents_cache, crm_id=item['id'])
-                if contact_phone:
-                    item['contact_phone'] = contact_phone
+                # Поиск телефона в API (используем оптимизированный индекс)
+                if api_name_to_phone:
+                    contact_phone = find_agent_phone_from_db_optimized(search_value, api_name_to_phone)
+                    if contact_phone:
+                        item['contact_phone'] = contact_phone
             else:  # krisha
-                # Поиск имени в API
-                contact_name = find_agent_name_by_phone_from_api(search_value, api_agents_cache)
-                if contact_name:
-                    item['contact_name'] = contact_name
+                # Поиск имени в API (используем оптимизированный индекс)
+                if api_phone_to_name:
+                    contact_name = api_phone_to_name.get(search_value)
+                    if contact_name:
+                        item['contact_name'] = contact_name
     
     # Пересчитываем контакты для статистики
     for item in paginated_items:
